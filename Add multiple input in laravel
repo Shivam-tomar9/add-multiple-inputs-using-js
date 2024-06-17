@@ -1,0 +1,512 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use App\Models\Course;
+use App\Models\Classes;
+use App\Models\CourseCategory;
+use App\Models\AssignTutor;
+use App\Models\User;
+use Carbon\Carbon;
+use Auth;
+
+class ClassesController extends Controller
+{
+    public function __construct()
+    {
+        $this->middleware('permission:class-schedule', ['only' => ['index', 'store']]);
+    }
+
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function index(request $request)
+    {
+        $fromDate = Date('Y-m-d 00:00:00', strtotime('-7 days'));
+        $toDate = Date('Y-m-d 00:00:00', strtotime('+15 days'));
+        
+    
+        if ($request->from_date) {
+            $fromDate = Date('Y-m-d 00:00:00', strtotime($request->from_date));
+        }
+         
+    
+        if ($request->to_date) {
+            $toDate = Date('Y-m-d 23:59:59', strtotime($request->to_date));
+        }
+
+        $categoryId = $request->category_id ?? '';
+        $courseId = $request->course_id ?? '';
+
+        $classes = Classes::with(['category', 'course', 'tutor'])
+            ->where(function ($query) use ($fromDate, $toDate, $categoryId, $courseId) {
+                if ($fromDate && $toDate) {
+                    $query->whereBetween('schedule_start', [$fromDate, $toDate]);
+                }
+
+                if ($categoryId) {
+                    $query->where('category_id', $categoryId);
+                }
+
+                if ($courseId) {
+                    $query->where('course_id', $courseId);
+                }
+            })
+            ->sortable(['id' => 'desc'])
+            ->paginate(15);
+
+        $courseCategories = CourseCategory::orderBy('name', 'asc')->pluck('name', 'id');
+
+        return view('classes.index', compact('classes', 'fromDate', 'toDate', 'courseCategories', 'categoryId'));
+    }
+
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function create(request $request)
+    {
+        $courseCategories = CourseCategory::orderBy('name', 'asc')->pluck('name', 'id');
+        $tutors = User::select('id', 'name', 'email')->where('account_type', 'Tutor')->where('status', '1')->get();
+        return view('classes.create', compact('courseCategories', 'tutors'));
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function store(Request $request)
+    {
+
+        // dd($request->all());
+        $validatedData = $request->validate([
+            'category_id' => 'required',
+            'course_id' => 'required',
+            'title' => 'required|unique:classes,title',
+            'tutor_id' => 'required',
+            'schedule_start' => 'required_if:select_schedule,today|nullable|date',
+            'schedule_time' => 'required_if:select_schedule,today|nullable|date_format:H:i',
+            'duration_today' => 'required_if:select_schedule,today|nullable|integer|min:1',
+            
+            
+            'class_mode' => 'required',
+        ]);
+    
+        $uploadFile = NULL;
+        if ($request->hasFile('upload')) {
+            $uploadName = uniqid() . '.' . $request->file('upload')->getClientOriginalExtension();
+            $uploadFilePath = '/public/upload/' . $uploadName;
+            $request->upload->move(public_path('upload'), $uploadName);
+            $uploadFile = $uploadName;
+        }
+    
+        // Handle schedule start and end for 'Today' schedule
+        if ($request->select_schedule === 'today') {
+            $scheduleStart = Carbon::parse($request->schedule_start . ' ' . $request->schedule_time);
+            $scheduleEnd = $scheduleStart->copy()->addMinutes($request->duration_today);
+    
+            $class = Classes::create([
+                'code' => uniqid(),
+                'title' => $request->title,
+                'objectives' => $request->objectives,
+                'prerequisite' => $request->prerequisite,
+                'upload' => $uploadFile,
+                'category_id' => $request->category_id,
+                'course_id' => $request->course_id,
+                'tutor_id' => $request->tutor_id,
+                'schedule_start' => $scheduleStart,
+                'schedule_end' => $scheduleEnd,
+                'duration' => $request->duration_today,
+                'class_mode' => $request->class_mode,
+                'meeting_link' => $request->meeting_link,
+                'location' => $request->location,
+                'status' => 'Scheduled',
+                'created_by' => Auth::id()
+            ]);
+    
+            if ($class->id) {
+                AssignTutor::updateOrCreate([
+                    'class_id' => $class->id,
+                    'tutor_id' => $request->tutor_id
+                ], [
+                    'notify' => 0
+                ]);
+            }
+    
+            return back()->with('success', 'Class scheduled successfully!');
+        }
+    
+        // Handle schedule start and end for 'Week' schedule
+        if ($request->select_schedule === 'week') {
+            $classDates = $request->class_date;
+            $classTimes = $request->class_time;
+            $durations = $request->duration;
+    
+            foreach ($classDates as $key => $classDate) {
+                $scheduleStart = Carbon::parse($classDate . ' ' . $classTimes[$key]);
+                $scheduleEnd = $scheduleStart->copy()->addMinutes($durations[$key]);
+    
+                $class = Classes::create([
+                    'code' => uniqid(),
+                    'title' => $request->title,
+                    'objectives' => $request->objectives,
+                    'prerequisite' => $request->prerequisite,
+                    'upload' => $uploadFile,
+                    'category_id' => $request->category_id,
+                    'course_id' => $request->course_id,
+                    'tutor_id' => $request->tutor_id,
+                    'schedule_start' => $scheduleStart,
+                    'schedule_end' => $scheduleEnd,
+                    'duration' => $durations[$key],
+                    'class_mode' => $request->class_mode,
+                    'meeting_link' => $request->meeting_link,
+                    'location' => $request->location,
+                    'status' => 'Scheduled',
+                    'created_by' => Auth::id()
+                ]);
+    
+                if ($class->id) {
+                    AssignTutor::updateOrCreate([
+                        'class_id' => $class->id,
+                        'tutor_id' => $request->tutor_id
+                    ], [
+                        'notify' => 0
+                    ]);
+                }
+            }
+    
+            return back()->with('success', 'Classes scheduled successfully!');
+        }
+    }
+    
+    /**
+     * Display the specified resource.
+     *
+     * @param  \App\Models\Classes  $classes
+     * @return \Illuminate\Http\Response
+     */
+    public function show(Classes $classes)
+    {
+        //
+    }
+
+    /**
+     * Show the form for editing the specified resource.
+     *
+     * @param  \App\Models\Classes  $classes
+     * @return \Illuminate\Http\Response
+     */
+    public function edit(request $request, $id)
+    {
+        $class = Classes::where('id', $id)->first();
+        $courseCategories = CourseCategory::orderBy('name', 'asc')->pluck('name', 'id');
+        $course = Course::where('category_id', $class->category_id)->pluck('title', 'id');
+        $tutors = User::select('id', 'name', 'email')->where('account_type', 'Tutor')->where('status', '1')->get();
+        return view('classes.edit', compact('class', 'course', 'courseCategories', 'tutors'));
+    }
+
+    /**
+     * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  \App\Models\Classes  $classes
+     * @return \Illuminate\Http\Response
+     */
+    public function update(Request $request, $id)
+    {
+        $validatedData = $request->validate([
+            'category_id' => 'required',
+            'course_id' => 'required',
+            'title' => 'required|unique:classes,title,' . $id,
+            'tutor_id' => 'required',
+            'schedule_start' => 'required',
+            'schedule_time' => 'required',
+            'duration' => 'required',
+            'class_mode' => 'required'
+        ]);
+
+        $scheduleStart = Carbon::parse(Date('Y-m-d', strtotime($request->schedule_start)) . ' ' . Date('H:i:s', strtotime($request->schedule_time)));
+        $scheduleEnd = Carbon::parse(Date("Y-m-d H:i:s", strtotime($scheduleStart . '+' . ($request->duration * 60) . ' seconds')));
+
+        $conflictingScheduleExists = Classes::where('id', '!=', $id)->where('course_id', $request->course_id)
+            ->where('tutor_id', $request->tutor_id)
+            ->where(function ($query) use ($scheduleStart, $scheduleEnd) {
+                $query->where(function ($query) use ($scheduleStart, $scheduleEnd) {
+                    $query->where('schedule_start', '<=', $scheduleStart)
+                        ->where('schedule_end', '>=', $scheduleStart);
+                })
+                    ->orWhere(function ($query) use ($scheduleStart, $scheduleEnd) {
+                        $query->where('schedule_start', '<=', $scheduleEnd)
+                            ->where('schedule_end', '>=', $scheduleEnd);
+                    })
+                    ->orWhere(function ($query) use ($scheduleStart, $scheduleEnd) {
+                        $query->where('schedule_start', '>=', $scheduleStart)
+                            ->where('schedule_end', '<=', $scheduleEnd);
+                    });
+            })
+            ->exists();
+
+        if ($conflictingScheduleExists) {
+            return redirect()->route('classes.index')->with('message', 'The tutor is already scheduled for another class.');
+        }
+
+        $uploadFile = NULL;
+        if ($request->hasFile('upload')) {
+            $uploadName = uniqid() . '.' . $request->file('upload')->getClientOriginalExtension();
+            $uploadFilePath = '/public/upload/' . $uploadName;
+            $request->upload->move(public_path('upload'), $uploadName);
+            $uploadFile = $uploadName;
+        }
+
+        Classes::where('id', $id)->update([
+            'title' => $request->title,
+            'objectives' => $request->objectives,
+            'prerequisite' => $request->prerequisite,
+            'upload' => $uploadFile,
+            'category_id' => $request->category_id,
+            'course_id' => $request->course_id,
+            'tutor_id' => $request->tutor_id,
+            'schedule_start' => $scheduleStart,
+            'schedule_end' => $scheduleEnd,
+            'duration' => $request->duration,
+            'class_mode' => $request->class_mode,
+            'meeting_link' => $request->meeting_link,
+            'location' => $request->location,
+            'status' => 'Scheduled',
+            'created_by' => Auth::id()
+        ]);
+
+        if ($id) {
+            AssignTutor::updateOrCreate([
+                'class_id' => $id,
+                'tutor_id' => $request->tutor_id
+            ], [
+                'notify' => 0
+            ]);
+        }
+
+        return redirect()->route('classes.index')->with('success', 'Class schedule created successfully!');
+    }
+
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  \App\Models\Classes  $classes
+     * @return \Illuminate\Http\Response
+     */
+    public function destroy(request $request, $id)
+    {
+        Classes::find($id)
+            ->update(['created_by' => Auth::id()]);
+        Classes::find($id)->delete();
+
+        return redirect()->route('classes.index')->with('success', 'Class Deleted successfully!');
+    }
+
+    public function classesList(request $request)
+    {
+        if ($request->ajax()) {
+            $courseId = $request->input('course_id');
+
+            $classes = Classes::where(function ($query) use ($courseId) {
+                if ($courseId) {
+                    $query->where('course_id', $courseId);
+                }
+            })
+                ->pluck('title', 'id');
+
+            return response()->json($classes);
+        }
+
+        return response()->json([]);
+    }
+
+
+    public function viewSchedule()
+    {
+        $times = $this->timeArray();
+        $schedules = Classes::with(['course', 'tutor'])
+            ->whereDate('schedule_start', '=', now()->toDateString())
+            
+            ->get();
+            
+
+        return view('classes.view_schedule', compact('times', 'schedules'));
+    }
+
+    public function timeArray()
+    {
+        $startTime = Carbon::createFromFormat('h:i A', '9:00 AM');
+        $endTime = Carbon::createFromFormat('h:i A', '10:00 PM');
+        $timeSlots = [];
+        while ($startTime <= $endTime) {
+            $timeSlots[] = $startTime->format('h:i A');
+            $startTime->addMinutes(60);
+        }
+
+        return $timeSlots;
+    }
+}
+//Blade part
+<form method="POST" action="{{ route('classes.store') }}" enctype="multipart/form-data">
+    @csrf
+	<div class="row">
+		<div class="col-md-3 mb-4">
+            <label class="mb-2 d-block">SELECT CATEGORY</label>
+			<select class="form-select" name="category_id" id="categoryInput" required>
+				<option value="">Select Category</option>
+                @forelse($courseCategories as $categoryId => $categoryName)
+                    <option value="{{$categoryId}}">{{$categoryName}}</option>
+                @empty
+                @endforelse
+			</select>
+		</div>
+		<div class="col-md-3 mb-4">
+            <label class="mb-2 d-block">SELECT COURSE</label>
+			<select class="form-select" name="course_id" id="courseInput" required>
+				<option value="">Select Course</option>
+			</select>
+		</div>
+		<div class="col-md-6 mb-4">
+            <label class="mb-2 d-block">CLASS TITLE</label>
+			<input type="text" name="title" class="form-control" placeholder="Class Title" required>
+		</div>
+        <div class="col-md-4 mb-4">
+            <label class="mb-2 d-block">OBJECTIVES</label>
+            <textarea class="form-control" name="objectives" id="objectivesInput"></textarea>
+        </div>
+        <div class="col-md-4 mb-4">
+            <label class="mb-2 d-block">PREQUISITE</label>
+            <textarea class="form-control" name="prerequisite" id="prerequisiteInput"></textarea>
+        </div>
+        <div class="col-md-4 mb-4">
+            <label class="mb-2 d-block">UPLOAD</label>
+            <input type="file" name="upload" class="form-control">
+        </div>
+	</div>
+    <div class="row">
+        <div class="col-md-12">
+            <hr/>
+        </div>
+    </div>
+    @canany(['class-schedule', 'tutor-assign'])
+    <div class="row">
+        @can('tutor-assign')
+        <div class="col-md-4 mb-4">
+            <label class="mb-2 d-block">ASSIGN TUTOR & SCHEDULE</label>
+            <select class="form-select" name="tutor_id" id="tutorInput" required>
+                <option value="">Select Tutor</option>
+            
+            </select>
+        </div>
+        @endcan
+
+    <div class="col-md-4 mb-4">
+     <label class="mb-2">SCHEDULE</label>
+        <div class="input-group">
+            <select id="select_schedule" name="select_schedule" class="form-control">
+                <option value="" selected disabled>Select Schedule</option>
+                <option value="today">Schedule Today</option>
+                <option value="week">Schedule for Weeks</option>
+            </select>
+        </div>
+   </div>
+
+    <div class="col-md-4 mb-4" id="today_schedule" style="display: none;">
+    <label class="mb-2">SCHEDULE TODAY</label>
+    <div class="input-group">
+        <input type="text" name="schedule_start" class="form-control" id="scheduleInput" value="" autocomplete="off" > 
+        <input type="time" name="schedule_time" class="form-control"  autocomplete="off">
+        <!-- Duration input for Today schedule -->
+        <input type="number" name="duration_today" class="form-control" placeholder="Duration (minutes)" autocomplete="off" >
+    </div>
+</div>
+
+<div class="col-md-4 mb-4" id="week_schedule" style="display: none;">
+    <label class="mb-2">FUTURE CLASSES</label>
+    <div id="future_classes">
+        <!-- Initial set of input fields for future classes -->
+        <div class="input-group mb-2 class-item">
+            <input type="date" name="class_date[]" class="form-control">
+            <input type="time" name="class_time[]" class="form-control">
+            <!-- Duration input for each future class -->
+            <input type="number" name="duration[]" class="form-control" placeholder="Duration (minutes)" autocomplete="off">
+            
+        </div>
+    </div>
+    <button type="button" class="btn btn-primary" id="add_class">Add Another Class</button>
+</div>
+
+{{-- <div class="col-md-4 mb-4">
+    <label class="mb-2">DURATION (IN MINUTES)</label>
+    <input type="number" name="duration_main" class="form-control" id="durationInput" value="" autocomplete="off" required>
+</div> --}}
+
+
+        <div class="col-md-4 mb-4">
+            <label class="mb-2 d-block">CLASS MODE</label>
+            <select class="form-select" name="class_mode" id="classModeInput" required>
+                <option value="online">Online</option>
+                <option value="offline">Offline</option>
+            </select>
+        </div>
+        <div class="col-md-4 meeting-div mb-4">
+            <label class="mb-2">MEETING LINK</label>
+            <input type="text" name="meeting_link" class="form-control" id="meetingInput" value="" autocomplete="off">
+        </div>
+        <div class="col-md-4 location-div mb-4 d-none">
+            <label class="mb-2">LOCATION</label>
+            <input type="text" name="location" class="form-control" id="locationInput" value="" autocomplete="off">
+        </div>
+    </div>
+    @endcanany
+    <button type="submit" class="btn btn-lg btn-primary">Save</button>
+</form>
+
+<script>
+$(document).ready(function() {
+    // Function to toggle between 'today' and 'week' schedules
+    $('#select_schedule').change(function() {
+        var schedule = $(this).val();
+        
+        if (schedule === 'today') {
+            $('#today_schedule').show();
+            $('#week_schedule').hide();
+            $('#durationInput').hide(); // Hide main duration input
+        } else if (schedule === 'week') {
+            $('#week_schedule').show();
+            $('#today_schedule').hide();
+            $('#durationInput').show(); // Show main duration input
+        } else {
+            $('#today_schedule').hide();
+            $('#week_schedule').hide();
+            $('#durationInput').hide(); // Hide main duration input
+        }
+    });
+
+    // Add class button click event
+    $('#add_class').click(function() {
+        var newClassInput = `
+            <div class="input-group mb-2 class-item">
+                <input type="date" name="class_date[]" class="form-control" required>
+                <input type="time" name="class_time[]" class="form-control" required>
+                <input type="number" name="duration[]" class="form-control" placeholder="Duration (minutes)" autocomplete="off" required>
+                <button type="button" class="btn btn-danger remove-class">Remove</button>
+            </div>`;
+        $('#future_classes').append(newClassInput);
+    });
+
+    // Remove class button click event using event delegation
+    $('#future_classes').on('click', '.remove-class', function() {
+        $(this).closest('.class-item').remove();
+    });
+});
+
+
+</script>
